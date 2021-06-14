@@ -1,0 +1,550 @@
+---
+title: "Codes of the manuscript: Analysis and simulation of plant disease progress curves in R: introducing the epifitter package "
+author: "Kaique Alves & Emerson Del Ponte"
+date: "22/09/2020"
+output:
+  html_document:
+    theme: journal
+    df_print: paged
+    toc: true
+    toc_float:
+      collapsed: yes
+    self_contained: yes
+---
+
+# Loading the packages needed to run these analysis
+
+```{r message=FALSE, warning=FALSE}
+library(epifitter)
+library(tidyverse)
+library(cowplot)
+library(gsheet)
+library(patchwork)
+library(ggthemes)
+library(multcomp)
+library(emmeans)
+
+```
+
+
+# Load data Actual data 
+
+Here we load the data from a google sheets using the function `gsheet2tbl()` from the package `gsheet`.
+
+```{r}
+data_load0 = gsheet2tbl("https://docs.google.com/spreadsheets/d/1SPAykaTw9tlcNALRMlSecaZQYQECTTaQtri2Lh3DSfo/edit#gid=0") 
+```
+
+# Wragling data
+
+This dataset contains data of disease progress curves of powdery mildew and Lata blight in tomato. However we are going to work only with powdery mildew. We also convert severity to proportion (0-1); Filter only the last year of evaluation; Transform days after planting to days after first disease evaluation; and change the name of the  levels of moisture to be clearer in the graphs.
+
+```{r}
+data_load = data_load0%>%
+  #removing Late blight part of the data.
+filter(disease != "Late blight",
+         irrigation_type != "Drip + Microsprinkler in alternate application",
+         irrigation_type != "Drip + Microsprinkler as P.Mildew control",
+         ) %>% 
+  #converting severity to proportion
+  mutate(sev = sev/100) %>% 
+  
+  #filter only the data from 2011
+  filter(year =="2011") %>%
+  
+  #convert dap to days after first evaluation
+  mutate(time = dap - min(dap)) %>%
+  #remove the dap column
+  dplyr::select(-dap) %>% 
+  
+  #Change the name of the levels of moisture for clarification
+  mutate(moisture = case_when(moisture == "High" ~ "High moisture",
+                              moisture == "Moderate" ~ "Moderate moisture"))
+
+head(data_load)
+
+```
+
+
+# Visualization
+
+Here we use `ggplot2` functions to produce the graph of the powdery mildew epidemics for each treatment (combination of irrigation system and moisture levels in the soil)
+
+```{r}
+data_load %>% 
+  ggplot(aes(time, sev, color =  irrigation_type))+
+  geom_point()+
+  # stat_summary()+ 
+  # geom_smooth(se = F)+
+  facet_wrap(year~moisture)
+```
+
+### AUDPC and AUDPS using epifitter
+
+The area under the disease progress curves and disease progress stais were calculated using the `AUDPC()` and `AUDPS()` fruntion from `epifitter` in the `summarise()` funtion from `dplyr()`.
+
+```{r}
+auc_data = data_load %>% 
+  group_by(year,irrigation_type, moisture, block) %>% 
+  summarise(audpc = AUDPC(time = time, y = sev ),
+            audps = AUDPS(time = time, y = sev ))
+head(auc_data)
+```
+
+### Mean and standard deviation
+
+Here we calculate the mean and standard deviation of AUDPC and AUDPS for each treatment. Values were round using the native funtion `round()`.
+
+```{r}
+auc_data %>% 
+  group_by(irrigation_type, moisture) %>% 
+  summarise(audpc_m = round(mean(audpc),1),
+            audpc_sd = round(sd(audpc),2),
+            audps_m = round(mean(audps),1),
+            audps_sd = round(sd(audps),2)) %>% 
+  arrange(desc(irrigation_type))
+```
+
+```{r eval=FALSE, include=FALSE}
+audpc_lm = lm(audpc ~ irrigation_type*moisture,data =  auc_data)
+# cld(emmeans(audpc_lm, "moisture", by  = "irrigation_type"))
+# cld(emmeans(audpc_lm, "irrigation_type", by  = "moisture"))
+```
+```{r eval=FALSE, include=FALSE}
+audps_lm = lm(audps ~ irrigation_type*moisture,data =  auc_data)
+# cld(emmeans(audps_lm, "moisture", by  = "irrigation_type"))
+# cld(emmeans(audps_lm, "irrigation_type", by  = "moisture"))
+```
+
+
+# Model fitting using epifitter
+
+We used the function `fit_multi()` to perform the fit of models to the multiple epidemics in the dataset. We chose to perfrme nonlinear regression (`nlin = T`) and also estimate the curve maximum assymptote (`estimate_K = T`).
+```{r}
+fit_pd = fit_multi(time_col = "time",
+          intensity_col = "sev",
+          strata_cols = c("irrigation_type", "moisture"),
+          estimate_K = T,
+          nlin = T,
+          data = data_load)
+```
+
+## Estimated parameters
+
+The output of the `fit_multi()` is a list containg the `$Parameters` and `$Data` `data.frame`s. Bellow is shown the `$Parameters` which contains the estimated parametes, their respective standard errors, confidence intervals and the models goodness of fit (CCC, RSE, and r_squared). 
+```{r}
+head( 
+  fit_pd$Parameters
+  )
+```
+
+### Best model
+
+Based on the goodness of fit parameters, we chose the Gompertz model. See below the parameters (`r`, `y0`, and `K`) estimates as well as the product (`r*K`).
+
+```{r}
+fit_pd$Parameters %>% 
+  filter(model == "Gompertz") %>% 
+  dplyr::select(irrigation_type, moisture,r, y0,
+                K
+                ) %>% 
+  mutate(r = round(r,3),
+         y0 = round(y0,3),
+         K = round(K,2),
+         `r*K` = K*r
+         )%>% 
+  arrange(desc(irrigation_type))
+```
+
+#### Max and min across treatments
+
+Here we calculate the max and minimum of each parameter across the treatments.
+```{r}
+fit_pd$Parameters %>% 
+  filter(model == "Gompertz") %>% 
+  dplyr::select(irrigation_type, moisture,r, y0,
+                K
+                ) %>% 
+  mutate(r = round(r,3),
+         y0 = round(y0,3),
+         K = round(K,2),
+         `r*K` = K*r
+         )%>% 
+  summarise(min(y0),
+            max(y0),
+            min(r),
+            max(r),
+            min(K),
+            max(K))
+```
+
+### Fitted curves
+
+Inside the `$Data` `data.frame` is the actual and fitted values of each models as well as the residual valeus in each treatment. Here show these values for the Gompertz model.
+
+```{r}
+head(
+  
+fit_pd$Data %>% 
+  filter(model == "Gompertz")
+
+)
+```
+### Visualization
+
+Using data from the `$Data` we can produce graphs using `ggplot2` as shown bellow.
+
+#### Disease progress curves
+
+```{r}
+curves = fit_pd$Data %>% 
+  filter(model == "Gompertz") %>% 
+  ggplot(aes(color = irrigation_type))+
+  geom_point(aes(time, y))+
+  geom_line(aes(time, predicted),
+            size = 1.2)+
+  scale_color_calc()+
+  facet_wrap(~moisture, ncol =2)+
+  theme_minimal_hgrid()+
+  ylim(0,0.5)+
+  labs(y = "Severity",
+       x = "Time (days)",
+        color = "Irrigation \nsystem")
+curves
+```
+
+#### Residuals
+```{r}
+resid = fit_pd$Data %>% 
+  filter(model == "Gompertz") %>% 
+  ggplot(aes(time, residual, color = irrigation_type))+
+  geom_hline(yintercept = 0)+
+  geom_point()+
+  geom_smooth(se=F,
+            size = 1.2)+
+  scale_color_calc()+
+  facet_wrap(irrigation_type~moisture, ncol = 4)+
+  theme_minimal_hgrid()+
+  labs(y = "Residuals",
+       x = "Time (days)",
+        color = "Irrigation \nsystem")+
+  theme(legend.position = "none",
+        panel.background = element_rect(color = "gray"))
+resid
+```
+
+
+#### Combo figure
+
+We buit a combo figure for publication. We use package `patchwork` for that.
+```{r fig.height=10, fig.width=12}
+curves/resid +
+  plot_layout(guides = "collect")+
+  plot_annotation(tag_levels = "A")
+
+ggsave("figs/fitting_Actual.png", dpi = 300,height = 10,width = 14)
+```
+
+### Goodness of fit
+
+Here we present the goodness of fit of the gompertz model. 
+```{r}
+fit_pd$Parameters %>% 
+  dplyr::select(irrigation_type, moisture, model, CCC, RSE, r_squared) %>% 
+  # pivot_longer(4:6, 
+  #              names_to = "stats",
+               # values_to = "value") %>%
+  filter(model == "Gompertz")%>%
+  arrange(desc(irrigation_type))
+  
+```
+
+
+# Simulation based on actual data
+
+We used the parameters estimated for the treatments for simulating disease progress cruves. Since the Gompertz model was the best model, we used the `sim_gompertz()` function from epifitter for simulating curves for each treatment. To inset variation into the simulated data, we use `alpha = 0.1`. Use `?sim_gompertz` for details.
+
+```{r}
+par_best_model = fit_pd$Parameters %>% 
+  filter(model=="Gompertz")
+epi_box = NULL
+for(i in 1:length(par_best_model$irrigation_type)){
+epi_sim = sim_gompertz(N = 63,
+             dt = 7,
+             y0 = par_best_model$y0[i],
+             r = par_best_model$r[i],
+             K = par_best_model$K[i],
+             n = 4,
+             alpha = 0.1)
+
+   epinho_box =  data.frame(irrigation_type = par_best_model$irrigation_type[i],
+         moisture = par_best_model$moisture[i], epi_sim)
+   epi_box = epi_box%>% 
+     bind_rows(epinho_box)
+}
+
+```
+
+#### Simulated curves.
+ See the comparative between the simulated data (dots) and the fitted curves (lines).
+```{r}
+epi_box %>% 
+  ggplot()+
+  geom_line(data = fit_pd$Data %>% filter(model=="Gompertz"),
+            aes(time, predicted, color = irrigation_type),
+            # linetype = "dashed"
+            )+
+  geom_point(aes(time, random_y, color = irrigation_type),
+             size = 2,
+             # color = NA,
+             shape=18
+             )+
+  facet_wrap(~moisture) + 
+  scale_color_calc()+
+  scale_fill_calc()+
+  theme_minimal_hgrid()+
+  labs(y = "Severity",
+       x = "Time (days)",
+       color = "Irrigation \nsystem",
+       fill = "Irrigation \nsystem")
+
+ggsave("figs/simulation_Actual.png", dpi = 300,height = 4,width = 9)
+
+```
+
+
+
+
+# Simulating DPCs for different models
+
+### The exponential model
+
+```{r}
+set.seed(1)
+exp_model <- sim_exponential(
+  N = 100,
+  y0 = 0.01,
+  dt = 5,
+  r = 0.045,
+  alpha = 0.2,
+  n = 7
+)
+head(exp_model)
+```
+
+The function returns a `data.frame` object with four columns. `replicates` indicate each respective replicate, in `time` we have the time steps, `y` contains the simulated values of disease intensity, and `random_y` contains values of disease intensity after inserting a variation. 
+
+Use the [`ggplot2`](https://ggplot2.tidyverse.org/) package to build impressive graphics!
+
+
+```{r}
+exp_plot = exp_model %>%
+  ggplot(aes(time, y)) +
+  geom_jitter(aes(time, random_y), size = 3,color = "gray", width = .1) +
+  geom_line(size = 1) +
+  theme_minimal_hgrid() +
+  ylim(0,1)+
+  labs(
+    title = "Exponential",
+    y = "Disease intensity",
+    x = "Time"
+  )
+exp_plot
+```
+
+### The Monomolecular model
+
+For the other models is exactly the same pipeline.
+
+```{r}
+set.seed(1)
+mono_model <- sim_monomolecular(
+  N = 100,
+  y0 = 0.01,
+  dt = 5,
+  r = 0.05,
+  alpha = 0.2,
+  n = 7
+)
+head(mono_model)
+```
+
+```{r}
+
+mono_plot = mono_model %>%
+  ggplot(aes(time, y)) +
+  geom_jitter(aes(time, random_y), size = 3, color = "gray", width = .1) +
+  geom_line(size = 1) +
+  theme_minimal_hgrid() +
+  labs(
+    title = "Monomolecular",
+    y = "Disease intensity",
+    x = "Time"
+  )
+mono_plot
+```
+
+### The Logistic model
+
+
+```{r}
+set.seed(1)
+logist_model <- sim_logistic(
+  N = 100,
+  y0 = 0.01,
+  dt = 5,
+  r = 0.1,
+  K = 1,
+  alpha = 0.2,
+  n = 7
+)
+# head(logist_model)
+```
+
+```{r}
+logist_plot = logist_model %>%
+  ggplot(aes(time, y)) +
+  geom_jitter(aes(time, random_y), size = 3,color = "gray", width = .1) +
+  geom_line(size = 1) +
+  theme_minimal_hgrid() +
+  labs(
+    title = "Logistic",
+    y = "Disease intensity",
+    x = "Time"
+  )
+logist_plot
+```
+
+### The Gompertz model
+
+
+```{r}
+set.seed(1)
+gomp_model <- sim_gompertz(
+  N = 100,
+  y0 = 0.01,
+  dt = 5,
+  r = 0.07,
+  alpha = 0.2,
+  n = 7
+)
+head(gomp_model)
+```
+
+```{r}
+gomp_plot = gomp_model %>%
+  ggplot(aes(time, y)) +
+  geom_jitter(aes(time, random_y), size = 3,color = "gray", width = .1) +
+  geom_line(size = 1) +
+  theme_minimal_hgrid() +
+  labs(
+    title = "Gompertz",
+    y = "Disease intensity",
+    x = "Time"
+  )
+gomp_plot
+```
+
+## Combo
+
+Use the function `plot_grid()` from the [`cowplot`](https://wilkelab.org/cowplot/index.html) package to gather all plots into a grid
+
+```{r fig.height=6, fig.width=8}
+exp_plot+mono_plot+logist_plot+gomp_plot&
+  theme_minimal_hgrid(font_size = 12)
+
+ggsave("figs/simulation.png", dpi = 800, height = 6, width = 9)
+```
+
+
+## AUDPC and AUDPS
+
+```{r}
+# Simulating epidemic:
+set.seed(1)
+epi = sim_logistic(N = 30, y0 = 0.01,dt = 5, r = 0.3, alpha = 0.5, n = 1)
+
+
+# Calculating AUDPC:
+AUDPC(time = epi$time, y = epi$y)
+
+# Calculating AUDPA:
+AUDPS(time = epi$time, y = epi$y)
+
+```
+
+## Model fitting
+
+We simulate a epidemic to use in for model fitting
+
+```{r}
+set.seed(12)
+epi = sim_logistic(N = 30, y0 = 0.1,dt = 3, r = 0.3, alpha = 0.5, n =4)
+head(epi)
+```
+
+### The `fit_lin()` function
+```{r}
+fit_lin(time = epi$time, y = epi$random_y)
+```
+### The `fit_nlin()` function
+```{r}
+fit_nlin(time = epi$time, y = epi$random_y)
+```
+
+### The `fit_lin2()` function
+```{r}
+set.seed(12)
+epi = sim_logistic(N = 30, y0 = 0.1,dt = 3, r = 0.3, alpha = 0.5, n =4)
+fit_nlin2(time = epi$time, y = epi$random_y)
+```
+
+# The `plot_fit()` function
+
+```{r}
+set.seed(12)
+epi = sim_logistic(N = 30, y0 = 0.1,dt = 3, r = 0.3, alpha = 0.5, n =4)
+model_fit = fit_nlin(time = epi$time, y = epi$random_y)
+plot_fit(model_fit,point_size = 2, line_size = 1) +
+  theme_minimal()+
+  ylim(0,1)+
+  labs(x = "Time", y = "Disease intensity")
+
+ggsave("figs/plotfit.png", dpi = 800, height  = 5, width = 7)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- ## Exportar dados para pacote -->
+```{r eval=FALSE, include=FALSE}
+# data_for_pkg = data_load %>% 
+#   mutate(dap = dap-min(dap),
+#          block = as.factor(block),
+#          time = dap) %>%
+#   select(irrigation_type, moisture, block, time, sev)
+# 
+# write.table(data_for_pkg, "data/PowderyMildew.txt")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
